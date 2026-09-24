@@ -595,7 +595,6 @@ class ZimbraClient:
         Returns:
             Tuple of (content_bytes, filename, content_type)
         """
-        import base64
         import urllib.request
         import urllib.error
         from urllib.parse import urlencode
@@ -603,18 +602,21 @@ class ZimbraClient:
         self._ensure_connected()
 
         # Build REST URL for attachment download
-        # Format: /service/home/~/?id=<msg_id>&part=<part_id>&auth=qp&zauthtoken=<token>
+        # Format: /service/home/~/?id=<msg_id>&part=<part_id>
+        # The auth token travels in the ZM_AUTH_TOKEN cookie, not in the query
+        # string, where it would leak into access logs and proxies.
         base_url = self.config.url.replace("/service/soap", "")
         params = urlencode({
             "id": msg_id,
             "part": part_id,
-            "auth": "qp",
-            "zauthtoken": self._token,
         })
         url = f"{base_url}/service/home/~/?{params}"
 
         try:
-            req = urllib.request.Request(url)
+            req = urllib.request.Request(
+                url,
+                headers={"Cookie": f"ZM_AUTH_TOKEN={self._token}"},
+            )
             with urllib.request.urlopen(req, timeout=self.config.timeout) as response:
                 content = response.read()
                 content_type = response.headers.get("Content-Type", "application/octet-stream")
@@ -626,7 +628,10 @@ class ZimbraClient:
                     import re
                     match = re.search(r'filename[*]?=["\']?([^"\';\n]+)', content_disp)
                     if match:
-                        filename = match.group(1).strip()
+                        # The server-supplied name is untrusted: keep only
+                        # the basename so it cannot carry path components.
+                        raw_name = match.group(1).strip().replace("\\", "/")
+                        filename = raw_name.rsplit("/", 1)[-1] or "attachment"
 
                 return content, filename, content_type
 

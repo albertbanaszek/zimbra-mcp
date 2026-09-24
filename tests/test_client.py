@@ -475,3 +475,48 @@ class TestDeleteContacts:
         params = _get_request_params(connected_client)
         assert params["action"]["id"] == "100,101"
         assert params["action"]["op"] == "delete"
+
+
+class TestGetAttachmentContent:
+    @staticmethod
+    def _patched_urlopen(content_disp, body=b"bytes"):
+        response = MagicMock()
+        response.read.return_value = body
+        response.headers = {
+            "Content-Type": "application/pdf",
+            "Content-Disposition": content_disp,
+        }
+        cm = MagicMock()
+        cm.__enter__.return_value = response
+        cm.__exit__.return_value = False
+        return patch("urllib.request.urlopen", return_value=cm)
+
+    def test_token_sent_as_cookie_not_in_url(self, connected_client):
+        with self._patched_urlopen('attachment; filename="report.pdf"') as urlopen:
+            content, filename, content_type = connected_client.get_attachment_content("1", "2")
+
+        request = urlopen.call_args[0][0]
+        assert "fake-token" not in request.full_url
+        assert "zauthtoken" not in request.full_url
+        assert request.get_header("Cookie") == "ZM_AUTH_TOKEN=fake-token"
+        assert content == b"bytes"
+        assert filename == "report.pdf"
+        assert content_type == "application/pdf"
+
+    def test_query_still_carries_id_and_part(self, connected_client):
+        with self._patched_urlopen('attachment; filename="a.pdf"') as urlopen:
+            connected_client.get_attachment_content("42", "2.1")
+
+        url = urlopen.call_args[0][0].full_url
+        assert "id=42" in url
+        assert "part=2.1" in url
+
+    def test_server_filename_path_is_stripped(self, connected_client):
+        with self._patched_urlopen('attachment; filename=../../evil.sh'):
+            _, filename, _ = connected_client.get_attachment_content("1", "2")
+        assert filename == "evil.sh"
+
+    def test_server_filename_windows_path_is_stripped(self, connected_client):
+        with self._patched_urlopen(r'attachment; filename=..\..\evil.exe'):
+            _, filename, _ = connected_client.get_attachment_content("1", "2")
+        assert filename == "evil.exe"

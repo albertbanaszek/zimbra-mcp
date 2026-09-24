@@ -15,6 +15,7 @@ from zimbra_mcp.tools.emails import (
     _guess_extension,
     _html_to_text,
     _prepare_body_with_original,
+    _sanitize_filename,
     register_email_tools,
 )
 
@@ -368,3 +369,92 @@ class TestSendEmailToolRegistration:
         connected_client.send_message.assert_called_once()
         assert result["success"] is True
         assert result["message_id"] == "200"
+
+
+class TestSanitizeFilename:
+    def test_plain_name_unchanged(self):
+        assert _sanitize_filename("report.pdf") == "report.pdf"
+
+    def test_strips_posix_path(self):
+        assert _sanitize_filename("../../etc/passwd") == "passwd"
+
+    def test_strips_windows_path(self):
+        assert _sanitize_filename(r"..\..\Users\me\evil.txt") == "evil.txt"
+
+    def test_dot_segments_rejected(self):
+        assert _sanitize_filename("..") == ""
+        assert _sanitize_filename(".") == ""
+        assert _sanitize_filename("") == ""
+
+    def test_reserved_characters_replaced(self):
+        assert _sanitize_filename('a<b>c:d"e|f?g*h.txt') == "a_b_c_d_e_f_g_h.txt"
+
+    def test_trailing_dots_and_spaces_stripped(self):
+        assert _sanitize_filename("evil.txt. .") == "evil.txt"
+
+    def test_leading_dot_preserved(self):
+        assert _sanitize_filename(".bashrc") == ".bashrc"
+
+
+class TestDownloadAttachment:
+    @staticmethod
+    def _tool(client, content=b"data", filename="report.pdf", ctype="application/pdf"):
+        client.get_attachment_content = MagicMock(return_value=(content, filename, ctype))
+        return capture_tools(register_email_tools, client)["download_attachment"]
+
+    def test_writes_file(self, connected_client, tmp_path):
+        download = self._tool(connected_client)
+        result = download("1", "2", str(tmp_path))
+
+        assert result["success"] is True
+        assert result["filename"] == "report.pdf"
+        assert (tmp_path / "report.pdf").read_bytes() == b"data"
+
+    def test_server_filename_traversal_stays_inside(self, connected_client, tmp_path):
+        target = tmp_path / "dest"
+        target.mkdir()
+        download = self._tool(connected_client, b"pwn", "../../evil.txt", "text/plain")
+
+        result = download("1", "2", str(target))
+
+        assert result["success"] is True
+        assert result["filename"] == "evil.txt"
+        assert (target / "evil.txt").read_bytes() == b"pwn"
+        assert not (tmp_path / "evil.txt").exists()
+
+    def test_caller_filename_traversal_stays_inside(self, connected_client, tmp_path):
+        target = tmp_path / "dest"
+        target.mkdir()
+        download = self._tool(connected_client, b"pwn", "ok.txt", "text/plain")
+
+        result = download("1", "2", str(target), filename="../../evil.txt")
+
+        assert result["success"] is True
+        assert result["filename"] == "evil.txt"
+        assert (target / "evil.txt").read_bytes() == b"pwn"
+        assert not (tmp_path / "evil.txt").exists()
+
+    def test_fallback_filename_when_unnamed(self, connected_client, tmp_path):
+        download = self._tool(connected_client, b"x", "attachment", "image/png")
+
+        result = download("55", "2.1", str(tmp_path))
+
+        assert result["filename"] == "attachment_55_2_1.png"
+        assert (tmp_path / "attachment_55_2_1.png").exists()
+
+    def test_missing_directory_rejected(self, connected_client, tmp_path):
+        download = self._tool(connected_client)
+        result = download("1", "2", str(tmp_path / "nope"))
+
+        assert result["success"] is False
+        assert "does not exist" in result["error"]
+
+    def test_file_as_directory_rejected(self, connected_client, tmp_path):
+        target = tmp_path / "afile"
+        target.write_text("x")
+        download = self._tool(connected_client)
+
+        result = download("1", "2", str(target))
+
+        assert result["success"] is False
+        assert "not a directory" in result["error"]

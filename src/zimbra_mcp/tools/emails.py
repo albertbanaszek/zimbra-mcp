@@ -482,15 +482,22 @@ def register_email_tools(mcp: FastMCP, client: ZimbraClient, config: ZimbraConfi
         # Download attachment content
         content, original_filename, content_type = client.get_attachment_content(msg_id, part_id)
 
-        # Determine final filename
-        final_filename = filename or original_filename
+        # Determine final filename (both candidate names are untrusted)
+        final_filename = _sanitize_filename(filename or original_filename)
         if not final_filename or final_filename == "attachment":
             # Fallback: use part_id and guess extension from content_type
             ext = _guess_extension(content_type)
-            final_filename = f"attachment_{msg_id}_{part_id.replace('.', '_')}{ext}"
+            final_filename = _sanitize_filename(
+                f"attachment_{msg_id}_{part_id.replace('.', '_')}{ext}"
+            )
 
-        # Write file
-        file_path = save_dir / final_filename
+        # Write file, refusing anything that would land outside save_dir
+        file_path = (save_dir / final_filename).resolve()
+        if file_path.parent != save_dir:
+            return {
+                "success": False,
+                "error": f"Refusing to write outside {save_dir}: {final_filename}",
+            }
         file_path.write_bytes(content)
 
         return {
@@ -567,6 +574,29 @@ def register_email_tools(mcp: FastMCP, client: ZimbraClient, config: ZimbraConfi
                 "subject": subject,
                 "body_preview": full_body[:200] + "..." if len(full_body) > 200 else full_body,
             }
+
+
+def _sanitize_filename(name: str) -> str:
+    """Reduce an untrusted name to a bare basename safe to join to a directory.
+
+    Both the caller-supplied filename and the one the mail server sends in
+    Content-Disposition may carry path separators or ".." segments that would
+    otherwise escape the destination directory.
+
+    Args:
+        name: Untrusted filename
+
+    Returns:
+        Basename with directory components and reserved characters removed,
+        or an empty string if nothing usable remains
+    """
+    base = name.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    if base in ("", ".", ".."):
+        return ""
+    # Characters Windows reserves in filenames, plus control characters
+    base = re.sub(r'[\x00-\x1f<>:"|?*]', "_", base)
+    # Windows silently drops trailing dots and spaces
+    return base.rstrip(". ")
 
 
 def _guess_extension(content_type: str) -> str:
